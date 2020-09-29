@@ -254,12 +254,20 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
 
     case result do
       {view, cid, event, values, upload} ->
-        payload = maybe_put_uploads(state, view, %{
-          "cid" => cid,
-          "type" => Atom.to_string(type),
-          "event" => event,
-          "value" => encode(type, values)
-        }, upload)
+        {type, value} = encode_event_type(type, values)
+
+        payload =
+          maybe_put_uploads(
+            state,
+            view,
+            %{
+              "cid" => cid,
+              "type" => type,
+              "event" => event,
+              "value" => value
+            },
+            upload
+          )
 
         {:noreply, push_with_reply(state, from, view, "event", payload)}
 
@@ -685,6 +693,12 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
 
   ## Element helpers
 
+  defp encode_event_type(type, value) when type in [:change, :submit],
+    do: {"form", Plug.Conn.Query.encode(value)}
+
+  defp encode_event_type(type, value),
+    do: {Atom.to_string(type), value}
+
   defp proxy_topic({topic, _}) when is_binary(topic), do: topic
   defp proxy_topic(%{proxy: {_ref, topic, _pid}}), do: topic
 
@@ -914,7 +928,7 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
   end
 
   defp form_defaults({"textarea", _, [value]}, name, acc) do
-    Plug.Conn.Query.decode_pair({name, value}, acc)
+    Plug.Conn.Query.decode_pair({name, String.replace_prefix(value, "\n", "")}, acc)
   end
 
   defp form_defaults({"input", _, _} = node, name, acc) do
@@ -1056,9 +1070,6 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
 
   defp fill_in_name("", name), do: name
   defp fill_in_name(prefix, name), do: prefix <> "[" <> name <> "]"
-
-  defp encode(:form, value), do: Plug.Conn.Query.encode(value)
-  defp encode(_, value), do: value
 
   defp stringify_type(:hook, value), do: stringify(value, & &1)
   defp stringify_type(_, value), do: stringify(value, &to_string/1)

@@ -19,6 +19,15 @@ defmodule Phoenix.LiveView.Channel do
     send(self(), {@prefix, :send_update, {module, id, assigns}})
   end
 
+  def send_update_after(module, id, assigns, time_in_milliseconds)
+      when is_integer(time_in_milliseconds) do
+    Process.send_after(
+      self(),
+      {@prefix, :send_update, {module, id, assigns}},
+      time_in_milliseconds
+    )
+  end
+
   def ping(pid) do
     GenServer.call(pid, {@prefix, :ping}, :infinity)
   end
@@ -356,6 +365,9 @@ defmodule Phoenix.LiveView.Channel do
       {:redirect, %{to: _to} = opts} ->
         {:redirect, copy_flash(new_state, Utils.get_flash(new_socket), opts), new_state}
 
+      {:redirect, %{external: url}} ->
+        {:redirect, copy_flash(new_state, Utils.get_flash(new_socket), %{to: url}), new_state}
+
       {:live, :redirect, %{to: _to} = opts} ->
         {:live_redirect, copy_flash(new_state, Utils.get_flash(new_socket), opts), new_state}
 
@@ -516,7 +528,7 @@ defmodule Phoenix.LiveView.Channel do
   end
 
   defp gather_keys([], acc), do: acc
-
+  defp gather_keys([%{} = map], acc), do: gather_keys(map, acc)
   defp gather_keys(nil, acc), do: acc
 
   defp handle_changed(state, %Socket{} = new_socket, ref, pending_live_patch \\ nil) do
@@ -550,6 +562,16 @@ defmodule Phoenix.LiveView.Channel do
     root_pid = new_socket.root_pid
 
     case result do
+      {:redirect, %{external: to} = opts} ->
+        opts =
+          copy_flash(new_state, flash, opts)
+          |> Map.delete(:external)
+          |> Map.put(:to, to)
+
+        new_state
+        |> push_redirect(opts, ref)
+        |> stop_shutdown_redirect(:redirect, opts)
+
       {:redirect, %{to: _to} = opts} ->
         opts = copy_flash(new_state, flash, opts)
 
