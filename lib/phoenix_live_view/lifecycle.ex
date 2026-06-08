@@ -153,6 +153,18 @@ defmodule Phoenix.LiveView.Lifecycle do
   end
 
   @doc false
+  def reset_for_warm_rerun(%__MODULE__{} = lifecycle) do
+    %{
+      lifecycle
+      | after_render: [],
+        handle_async: [],
+        handle_event: [],
+        handle_info: [],
+        handle_params: []
+    }
+  end
+
+  @doc false
   def mount(params, session, %Socket{private: %{@lifecycle => lifecycle}} = socket) do
     reduce_socket(lifecycle.mount, socket, fn %{id: {mod, arg}} = hook, acc ->
       case hook.function.(arg, params, session, acc) do

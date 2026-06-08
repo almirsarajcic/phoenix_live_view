@@ -19,6 +19,7 @@ import {
   PHX_HAS_SUBMITTED,
   PHX_HOOK,
   PHX_PARENT_ID,
+  PHX_PARK,
   PHX_PROGRESS,
   PHX_READONLY,
   PHX_REF_LOADING,
@@ -118,6 +119,7 @@ export default class View {
   private children: Record<string, Record<string, View>> | null;
   private pendingForms: Set<string>;
   private formsForRecovery: Record<string, HTMLFormElement>;
+  private isWarmJoin: boolean;
 
   constructor(
     el: Element,
@@ -190,6 +192,7 @@ export default class View {
     this.children = this.parent ? null : {};
     this.root.children![this.id] = {};
     this.formsForRecovery = {};
+    this.isWarmJoin = false;
     this.channel = this.liveSocket.channel(`lv:${this.id}`, () => {
       const url = this.href && this.expandURL(this.href);
       return {
@@ -199,6 +202,7 @@ export default class View {
         session: this.getSession(),
         static: this.getStatic(),
         flash: this.flash ?? undefined,
+        park: this.getPark() ?? undefined,
         sticky: this.el.hasAttribute(PHX_STICKY),
       };
     });
@@ -244,6 +248,10 @@ export default class View {
 
   getSession(): string {
     return this.el.getAttribute(PHX_SESSION)!;
+  }
+
+  getPark(): string | null {
+    return this.el.getAttribute(PHX_PARK);
   }
 
   getStatic(): string | null {
@@ -405,6 +413,7 @@ export default class View {
 
   onJoin(resp) {
     const { rendered, container, liveview_version, pid } = resp;
+    this.isWarmJoin = !!resp.warm;
     if (container) {
       const [tag, attrs] = container;
       this.el = DOM.replaceRootContainer(this.el, tag, attrs);
@@ -570,7 +579,9 @@ export default class View {
       }
     }
     this.attachTrueDocEl();
-    const patch = new DOMPatch(this, this.el, html, streams, null);
+    const patch = new DOMPatch(this, this.el, html, streams, null, {
+      warm: this.isWarmJoin,
+    });
     patch.markPrunableContentForRemoval();
     this.performPatch(patch, false, true);
     this.joinNewChildren();

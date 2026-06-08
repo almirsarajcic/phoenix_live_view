@@ -9,6 +9,7 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
 
   defstruct session_token: nil,
             static_token: nil,
+            park_token: nil,
             module: nil,
             endpoint: nil,
             router: nil,
@@ -105,14 +106,15 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
 
     {lazy_html, html_tree} = html
 
-    {id, session_token, static_token, redirect_url} =
+    {id, session_token, static_token, park_token, redirect_url} =
       case Map.fetch(opts, :live_redirect) do
         {:ok, {id, session_token, static_token}} ->
-          {id, session_token, static_token, url}
+          {id, session_token, static_token, nil, url}
 
         :error ->
           [{id, session_token, static_token} | _] = TreeDOM.find_live_views(html_tree)
-          {id, session_token, static_token, nil}
+          park_token = TreeDOM.find_park_token(html_tree)
+          {id, session_token, static_token, park_token, nil}
       end
 
     root_view = %ClientProxy{
@@ -122,6 +124,7 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
       connect_info: connect_info,
       session_token: session_token,
       static_token: static_token,
+      park_token: park_token,
       module: module,
       endpoint: endpoint,
       router: router,
@@ -268,6 +271,17 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
 
     params = put_non_nil(params, "url", url)
     params = put_non_nil(params, "redirect", redirect_url)
+
+    # Support force-cold testing: if connect_params contains "__force_cold__" => true,
+    # null out the park token so the WS join skips the warm branch.
+    park_token =
+      if view.connect_params["__force_cold__"] do
+        nil
+      else
+        view.park_token
+      end
+
+    params = put_non_nil(params, "park", park_token)
 
     from = {self(), ref}
 

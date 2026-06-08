@@ -370,6 +370,83 @@ defmodule Phoenix.LiveView.Utils do
   end
 
   @doc """
+  Runs the on_mount hooks on the warm branch, skipping `view.mount/3`.
+
+  The dead-render hooks are already spliced onto the socket, so the hooks here
+  run against a scratch socket and their assigns are discarded to avoid
+  double-registration; only mount options and any halt/redirect are propagated.
+  """
+  @spec run_on_mount_hooks!(Socket.t(), module(), map(), map()) :: Socket.t()
+  def run_on_mount_hooks!(%Socket{} = socket, view, params, session) do
+    %{callbacks?: callbacks?} = Lifecycle.stage_info(socket, view, :mount, 3)
+
+    if callbacks? do
+      :telemetry.span(
+        [:phoenix, :live_view, :mount],
+        %{socket: socket, params: params, session: session, uri: nil},
+        fn ->
+          scratch_lifecycle =
+            socket.private
+            |> Map.fetch!(:lifecycle)
+            |> Lifecycle.reset_for_warm_rerun()
+
+          scratch = put_in(socket.private[:lifecycle], scratch_lifecycle)
+
+          result_socket =
+            case Lifecycle.mount(params, session, scratch) do
+              {:cont, scratch} ->
+                # Propagate mount options but discard scratch assigns so on_mount
+                # side-effects do not leak onto the WS socket.
+                socket
+                |> copy_mount_option_from_scratch(scratch, :live_layout)
+                |> copy_mount_option_from_scratch(scratch, :temporary_assigns)
+
+              {:halt, halted} ->
+                if match?({:live, :patch, _}, halted.redirected),
+                  do: raise_bad_mount_and_live_patch!()
+
+                %{socket | redirected: halted.redirected}
+            end
+
+          {result_socket, %{socket: result_socket, params: params, session: session, uri: nil}}
+        end
+      )
+    else
+      socket
+    end
+  end
+
+  # Copies a mount option from the scratch socket onto the real socket. For
+  # :temporary_assigns it also merges the declared defaults into assigns, like
+  # handle_mount_option/3 does on the cold path.
+  defp copy_mount_option_from_scratch(socket, scratch, :temporary_assigns) do
+    case Map.fetch(scratch.private, :temporary_assigns) do
+      {:ok, temp_assigns} ->
+        %{
+          socket
+          | assigns: Map.merge(temp_assigns, socket.assigns),
+            private:
+              Map.update(
+                socket.private,
+                :temporary_assigns,
+                temp_assigns,
+                &Map.merge(&1, temp_assigns)
+              )
+        }
+
+      :error ->
+        socket
+    end
+  end
+
+  defp copy_mount_option_from_scratch(socket, scratch, key) do
+    case Map.fetch(scratch.private, key) do
+      {:ok, value} -> put_in(socket.private[key], value)
+      :error -> socket
+    end
+  end
+
+  @doc """
   Calls the `c:Phoenix.LiveComponent.mount/1` callback, otherwise returns the socket as is.
   """
   def maybe_call_live_component_mount!(%Socket{} = socket, component) do

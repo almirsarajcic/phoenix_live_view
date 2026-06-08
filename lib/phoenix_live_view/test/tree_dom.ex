@@ -228,6 +228,28 @@ defmodule Phoenix.LiveViewTest.TreeDOM do
     |> parse_live_views_attributes()
   end
 
+  @doc """
+  Finds the `data-phx-park` token from the root live view element (the element
+  with `data-phx-main`). Returns nil when no `data-phx-park` attribute is found.
+  """
+  @spec find_park_token(tree :: term()) :: String.t() | nil
+  def find_park_token(tree) do
+    # Look for data-phx-park on the root live view element.
+    # In router-mounted renders the root element also carries data-phx-main,
+    # but in live_isolated renders there is no router so data-phx-main is
+    # absent — we search for data-phx-park directly instead.
+    case filter(tree, fn node -> attribute(node, "data-phx-park") end) do
+      [{_, attributes, _} | _] ->
+        case List.keyfind(attributes, "data-phx-park", 0) do
+          {_, token} -> token
+          nil -> nil
+        end
+
+      [] ->
+        nil
+    end
+  end
+
   defp parse_live_views_attributes(attributes) do
     attributes
     |> Enum.reduce([], fn node, acc ->

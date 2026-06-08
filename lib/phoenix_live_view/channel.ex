@@ -1215,6 +1215,14 @@ defmodule Phoenix.LiveView.Channel do
       sticky?: params["sticky"]
     }
 
+    # Capture the park token from the WS join params BEFORE params is
+    # reassigned to the route-level params below (which is :not_mounted_at_router
+    # for live_isolated mounts and a map of URL/query params for routed mounts).
+    join_park_token = if is_map(params), do: params["park"]
+
+    warm_mount_enabled? =
+      Keyword.get(Application.get_env(:phoenix_live_view, :warm_mount, []), :enabled, false)
+
     {params, host_uri, action} =
       case route do
         %Route{uri: %URI{host: host}} = route when byte_size(host) <= @max_host_size ->
@@ -1231,11 +1239,46 @@ defmodule Phoenix.LiveView.Channel do
       {:ok, mount_priv} ->
         socket = Utils.configure_socket(socket, mount_priv, action, flash, host_uri)
 
+        parked =
+          if warm_mount_enabled? && join_park_token do
+            case Phoenix.LiveView.Park.take(join_park_token, endpoint, id, view) do
+              {:ok, parked_socket} -> {:ok, parked_socket}
+              _ -> :miss
+            end
+          else
+            :miss
+          end
+
+        # Send test signal when warm branch is taken (no-op in prod when env not set)
+        if match?({:ok, _}, parked) do
+          if test_pid = Application.get_env(:phoenix_live_view, :warm_mount_test_pid) do
+            send(test_pid, :warm_taken)
+          end
+        end
+
         try do
-          socket
-          |> load_layout(route)
-          |> Utils.maybe_call_live_view_mount!(view, params, merged_session, url)
-          |> build_state(phx_socket)
+          {socket_after_mount, warm?} =
+            case parked do
+              {:ok, parked_socket} ->
+                result =
+                  socket
+                  |> splice_parked_state(parked_socket)
+                  |> load_layout(route)
+                  |> Utils.run_on_mount_hooks!(view, params, merged_session)
+
+                {result, true}
+
+              :miss ->
+                result =
+                  socket
+                  |> load_layout(route)
+                  |> Utils.maybe_call_live_view_mount!(view, params, merged_session, url)
+
+                {result, false}
+            end
+
+          socket_after_mount
+          |> build_state(phx_socket, warm?)
           |> maybe_call_mount_handle_params(router, url, params)
           |> reply_mount(from, verified, route)
           |> maybe_subscribe_to_live_reload()
@@ -1402,7 +1445,9 @@ defmodule Phoenix.LiveView.Channel do
 
     case result do
       {:ok, diff, :mount, new_state} ->
-        diff = maybe_put_debug_pid(%{rendered: diff, liveview_version: lv_vsn})
+        base = %{rendered: diff, liveview_version: lv_vsn}
+        base = if new_state[:warm?], do: Map.put(base, :warm, true), else: base
+        diff = maybe_put_debug_pid(base)
         reply = put_container(session, route, diff)
         GenServer.reply(from, {:ok, reply})
         {:noreply, post_verified_mount(new_state)}
@@ -1436,7 +1481,7 @@ defmodule Phoenix.LiveView.Channel do
     end
   end
 
-  defp build_state(%Socket{} = lv_socket, %Phoenix.Socket{} = phx_socket) do
+  defp build_state(%Socket{} = lv_socket, %Phoenix.Socket{} = phx_socket, warm?) do
     %{
       join_ref: phx_socket.join_ref,
       serializer: phx_socket.serializer,
@@ -1446,7 +1491,8 @@ defmodule Phoenix.LiveView.Channel do
       fingerprints: Diff.new_fingerprints(),
       redirect_count: 0,
       upload_names: %{},
-      upload_pids: %{}
+      upload_pids: %{},
+      warm?: warm?
     }
   end
 
@@ -1706,5 +1752,27 @@ defmodule Phoenix.LiveView.Channel do
       %{} ->
         %{}
     end
+  end
+
+  defp splice_parked_state(%Socket{} = ws_socket, %Socket{} = parked_socket) do
+    # Keep the WS-specific fields already on ws_socket and copy the
+    # mount-derived state from parked_socket. live_temp is reset because the
+    # dead render's pending push_events/flash would otherwise double-fire, and
+    # live_session_name is kept from ws_socket (the dead-render socket never
+    # sets it, and copying nil would break push_patch's live_session match).
+    %{
+      ws_socket
+      | assigns: Map.put(parked_socket.assigns, :flash, ws_socket.assigns.flash),
+        host_uri: parked_socket.host_uri,
+        redirected: nil,
+        private:
+          Map.merge(ws_socket.private, %{
+            lifecycle: parked_socket.private.lifecycle,
+            assign_new: ws_socket.private.assign_new,
+            live_temp: %{},
+            root_view: parked_socket.private.root_view,
+            conn_session: ws_socket.private[:conn_session]
+          })
+    }
   end
 end

@@ -61,6 +61,7 @@ export default class DOMPatch {
   private afterTransitionsDiscardedCallbacks: AfterTransitionsDiscardedCallback[];
   private withChildren: boolean;
   private undoRef: number | null;
+  private warmJoin: boolean;
 
   constructor(
     view: View,
@@ -68,7 +69,7 @@ export default class DOMPatch {
     html: string | Node,
     streams: Set<Stream>,
     targetCID: number | null,
-    opts: { withChildren?: boolean; undoRef?: number } = {},
+    opts: { withChildren?: boolean; undoRef?: number; warm?: boolean } = {},
   ) {
     this.view = view;
     this.liveSocket = view.liveSocket;
@@ -97,6 +98,7 @@ export default class DOMPatch {
     this.withChildren =
       opts.withChildren || opts.undoRef !== undefined || false;
     this.undoRef = opts.undoRef ?? null;
+    this.warmJoin = opts.warm || false;
   }
 
   beforeUpdated(callback: BeforeUpdatedCallback) {
@@ -535,6 +537,18 @@ export default class DOMPatch {
           .filter((el) => this.view.ownsElement(el))
           .forEach((el) => {
             Array.from(el.children).forEach((child) => {
+              // parked-process: the dead-render DOM is authoritative and continues into
+              // the connected session; preserve re-inserted children in place to avoid
+              // a transient detach that collapses layouts (e.g. absolute-positioned masonry).
+              // Only detach children NOT present in this join's stream inserts (stale items).
+              // Gate to warm joins only — cold reconnects must detach to avoid stale nodes.
+              if (this.warmJoin && this.streamInserts[child.id]) {
+                const { ref } = this.getStreamInsert(child);
+                if (ref !== undefined) {
+                  this.setStreamRef(child, ref);
+                }
+                return;
+              }
               // we already performed the owner check, each child is guaranteed to be owned
               // by the view. To prevent the nested owner check from failing in case of nested
               // streams where the parent is removed before the child, we force the removal

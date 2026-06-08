@@ -205,5 +205,38 @@ defmodule Phoenix.LiveViewTest.Support.Router do
     live "/thermo-with-metadata", ThermostatLive, metadata: %{route_name: "opts"}
   end
 
+  # Park routes
+  scope "/park", alias: Phoenix.LiveViewTest.Support do
+    pipe_through :browser
+
+    live "/plain", ParkLive
+
+    live_session :park_record_pid, on_mount: Phoenix.LiveViewTest.Support.ParkRecordPid do
+      live "/on-mount", ParkLive
+    end
+
+    live_session :park_halt, on_mount: Phoenix.LiveViewTest.Support.ParkHaltMount do
+      live "/halt", ParkLive
+    end
+
+    live_session :park_order,
+      on_mount: [Phoenix.LiveViewTest.Support.ParkOrderA, Phoenix.LiveViewTest.Support.ParkOrderB] do
+      live "/order", ParkLive
+    end
+
+    live_session :park_sentinel, on_mount: Phoenix.LiveViewTest.Support.ParkScratchHook do
+      live "/sentinel", ParkSentinelLive
+    end
+
+    live_session :park_attach_in_mount,
+      on_mount: Phoenix.LiveViewTest.Support.ParkAttachInMount do
+      live "/attach-in-mount", ParkAttachInMountLive
+    end
+
+    live_session :park_cont_redirect, on_mount: Phoenix.LiveViewTest.Support.ParkContRedirect do
+      live "/cont-redirect", ParkLive
+    end
+  end
+
   def session(%Plug.Conn{}, extra), do: Map.merge(extra, %{"called" => true})
 end

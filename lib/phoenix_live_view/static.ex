@@ -159,7 +159,21 @@ defmodule Phoenix.LiveView.Static do
           phx_static: sign_static_token(socket)
         ]
 
-        data_attrs = if(router, do: [phx_main: true], else: []) ++ data_attrs
+        park_data =
+          if Keyword.get(
+               Application.get_env(:phoenix_live_view, :warm_mount, []),
+               :enabled,
+               false
+             ) do
+            case Phoenix.LiveView.Park.park(socket) do
+              {:ok, token} -> [phx_park: token]
+              _ -> []
+            end
+          else
+            []
+          end
+
+        data_attrs = if(router, do: [phx_main: true], else: []) ++ park_data ++ data_attrs
 
         attrs = [
           {:id, socket.id},
