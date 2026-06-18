@@ -567,6 +567,39 @@ defmodule Phoenix.LiveView.Channel do
     function_exported?(m, f, a) or (Code.ensure_loaded?(m) and function_exported?(m, f, a))
   end
 
+  # Calls c:Phoenix.LiveView.on_connect/1 if defined, then returns updated state.
+  # Runs on every connect (cold, warm/resumed, reconnect) after build_state sets
+  # transport_pid, so connected?(socket) is true inside the callback.
+  defp maybe_call_on_connect(%{socket: socket} = state) do
+    view = socket.view
+
+    if function_exported?(view, :on_connect, 1) do
+      case view.on_connect(socket) do
+        {:ok, %Socket{} = new_socket} ->
+          %{state | socket: new_socket}
+
+        result ->
+          raise ArgumentError, """
+          invalid return from #{inspect(view)}.on_connect/1.
+
+          Expected {:ok, socket}, got: #{inspect(result)}
+          """
+      end
+    else
+      state
+    end
+  end
+
+  # Resumed connect: handle_params/3 already ran on the dead render with this exact
+  # URL, so we reuse the spliced socket and render it without invoking the callback
+  # again. We still route through mount_handle_params_result/3 (with a synthetic
+  # {:noreply, socket}) so that a redirect set by on_connect/1 — e.g. a connect-time
+  # push_patch — is honored exactly as it would be on the cold path, and the warm
+  # flag is preserved on the live_patch reply arm.
+  defp render_resumed_mount(%{socket: socket} = state) do
+    mount_handle_params_result({:noreply, socket}, state, :mount)
+  end
+
   defp maybe_call_mount_handle_params(%{socket: socket} = state, router, url, params) do
     %{view: view, redirected: mount_redirect} = socket
     lifecycle = Lifecycle.stage_info(socket, view, :handle_params, 3)
@@ -1217,6 +1250,13 @@ defmodule Phoenix.LiveView.Channel do
       sticky?: params["sticky"]
     }
 
+    # Capture the resume token from the WS join params BEFORE params is
+    # reassigned to the route-level params below (which is :not_mounted_at_router
+    # for live_isolated mounts and a map of URL/query params for routed mounts).
+    join_resume_token = if is_map(params), do: params["resume"]
+
+    resume_enabled? = Phoenix.LiveView.Resume.enabled?(config)
+
     {params, host_uri, action} =
       case route do
         %Route{uri: %URI{host: host}} = route when byte_size(host) <= @max_host_size ->
@@ -1233,12 +1273,60 @@ defmodule Phoenix.LiveView.Channel do
       {:ok, mount_priv} ->
         socket = Utils.configure_socket(socket, mount_priv, action, flash, host_uri)
 
+        resumed =
+          if resume_enabled? && join_resume_token do
+            case Phoenix.LiveView.Resume.redeem(join_resume_token, endpoint, id, view) do
+              {:ok, resumed_socket} -> {:ok, resumed_socket}
+              _ -> :miss
+            end
+          else
+            :miss
+          end
+
         try do
-          socket
-          |> load_layout(route)
-          |> Utils.maybe_call_live_view_mount!(view, params, merged_session, url)
-          |> build_state(phx_socket)
-          |> maybe_call_mount_handle_params(router, url, params)
+          {socket_after_mount, warm?} =
+            case resumed do
+              {:ok, resumed_socket} ->
+                # Resume reuses the fully mounted dead-render socket: mount/3 and
+                # every on_mount hook already ran on the dead render and their
+                # assigns are spliced back in here. We deliberately do NOT re-run
+                # the on_mount hooks — re-running them would redo the (often
+                # expensive) work the dead render already did and, for values that
+                # differ between the dead render and the connect, reintroduce a
+                # flash. Connection-only work belongs in on_connect/1 instead.
+                result =
+                  socket
+                  |> splice_resumed_state(resumed_socket)
+                  |> load_layout(route)
+
+                {result, true}
+
+              :miss ->
+                result =
+                  socket
+                  |> load_layout(route)
+                  |> Utils.maybe_call_live_view_mount!(view, params, merged_session, url)
+
+                {result, false}
+            end
+
+          state =
+            socket_after_mount
+            |> build_state(phx_socket, warm?)
+            |> maybe_call_on_connect()
+
+          # On a resumed connect the dead render already ran handle_params/3 with
+          # this exact URL, and its result is part of the spliced socket. Re-running
+          # it would redo that work (the double load resume exists to avoid) and, for
+          # data loaded there, reintroduce a flash — so we skip the callback and just
+          # render the reused socket. Later live navigations still call handle_params/3
+          # as usual. A handle_params/3 that redirects never parks a socket (Static
+          # redirects before issuing a resume token), so there is nothing to honor here.
+          if warm? do
+            render_resumed_mount(state)
+          else
+            maybe_call_mount_handle_params(state, router, url, params)
+          end
           |> reply_mount(from, verified, route)
           |> maybe_subscribe_to_live_reload()
         rescue
@@ -1404,19 +1492,17 @@ defmodule Phoenix.LiveView.Channel do
 
     case result do
       {:ok, diff, :mount, new_state} ->
-        diff = maybe_put_debug_pid(%{rendered: diff, liveview_version: lv_vsn})
+        base = %{rendered: diff, liveview_version: lv_vsn}
+        base = if new_state[:warm?], do: Map.put(base, :warm, true), else: base
+        diff = maybe_put_debug_pid(base)
         reply = put_container(session, route, diff)
         GenServer.reply(from, {:ok, reply})
         {:noreply, post_verified_mount(new_state)}
 
       {:ok, diff, {:live_patch, opts}, new_state} ->
-        reply =
-          put_container(session, route, %{
-            rendered: diff,
-            live_patch: opts,
-            liveview_version: lv_vsn
-          })
-
+        base = %{rendered: diff, live_patch: opts, liveview_version: lv_vsn}
+        base = if new_state[:warm?], do: Map.put(base, :warm, true), else: base
+        reply = put_container(session, route, base)
         GenServer.reply(from, {:ok, reply})
         {:noreply, post_verified_mount(new_state)}
 
@@ -1446,7 +1532,7 @@ defmodule Phoenix.LiveView.Channel do
     end
   end
 
-  defp build_state(%Socket{} = lv_socket, %Phoenix.Socket{} = phx_socket) do
+  defp build_state(%Socket{} = lv_socket, %Phoenix.Socket{} = phx_socket, warm?) do
     %{
       join_ref: phx_socket.join_ref,
       serializer: phx_socket.serializer,
@@ -1456,7 +1542,8 @@ defmodule Phoenix.LiveView.Channel do
       fingerprints: Diff.new_fingerprints(),
       redirect_count: 0,
       upload_names: %{},
-      upload_pids: %{}
+      upload_pids: %{},
+      warm?: warm?
     }
   end
 
@@ -1715,6 +1802,44 @@ defmodule Phoenix.LiveView.Channel do
 
       %{} ->
         %{}
+    end
+  end
+
+  defp splice_resumed_state(%Socket{} = ws_socket, %Socket{} = resumed_socket) do
+    # Keep the WS-specific fields already on ws_socket and copy the
+    # mount-derived state from resumed_socket. live_temp is reset because the
+    # dead render's pending push_events/flash would otherwise double-fire, and
+    # live_session_name is kept from ws_socket (the dead-render socket never
+    # sets it, and copying nil would break push_patch's live_session match).
+    #
+    # Because on_mount hooks are not re-run on the warm path, any mount option
+    # they set on the dead render (a custom :live_layout, :temporary_assigns)
+    # would otherwise be lost — so we carry those across here as well.
+    private =
+      ws_socket.private
+      |> Map.merge(%{
+        lifecycle: resumed_socket.private.lifecycle,
+        assign_new: ws_socket.private.assign_new,
+        live_temp: %{},
+        root_view: resumed_socket.private.root_view,
+        conn_session: ws_socket.private[:conn_session]
+      })
+      |> copy_resumed_private(resumed_socket.private, :live_layout)
+      |> copy_resumed_private(resumed_socket.private, :temporary_assigns)
+
+    %{
+      ws_socket
+      | assigns: Map.put(resumed_socket.assigns, :flash, ws_socket.assigns.flash),
+        host_uri: resumed_socket.host_uri,
+        redirected: nil,
+        private: private
+    }
+  end
+
+  defp copy_resumed_private(private, resumed_private, key) do
+    case Map.fetch(resumed_private, key) do
+      {:ok, value} -> Map.put(private, key, value)
+      :error -> private
     end
   end
 end

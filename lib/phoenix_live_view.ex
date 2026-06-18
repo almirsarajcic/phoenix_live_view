@@ -212,6 +212,63 @@ defmodule Phoenix.LiveView do
      exits should be avoided, as it changes how your LiveView reacts to all exits, not only
      ones related to async operations.
 
+  ## Resume configuration
+
+  LiveView normally runs `c:mount/3` twice for each page load: once during the
+  initial HTTP dead render and again when the client WebSocket connects. The opt-in
+  resume feature eliminates this duplication by retaining the fully-mounted socket
+  from the dead render and reusing it on the WebSocket connect, skipping the second
+  mount entirely.
+
+  Resume is disabled by default. To enable it app-wide, add to your config:
+
+      config :phoenix_live_view, :resume,
+        enabled: true,
+        ttl: 5_000,
+        max_children: 10_000
+
+  Options:
+
+    * `:enabled` - whether resume is active app-wide. Defaults to `false`.
+
+    * `:ttl` - how long, in milliseconds, an unclaimed holder process survives
+      before being discarded. Defaults to `5_000` (5 seconds). Keep this short: a
+      WebSocket connect that arrives within the TTL can redeem the socket; one that
+      arrives after the TTL falls back to a normal cold mount.
+
+    * `:max_children` - cap on the number of concurrent holder processes. Defaults
+      to `10_000`. When the cap is reached, new dead renders simply skip emitting the
+      resume token and mount normally; no error is raised.
+
+  Per-LiveView overrides are available via the `:resume` option in `use Phoenix.LiveView`.
+
+  > #### Cross-node deployments {: .info}
+  >
+  > Resume is node-local. In a clustered deployment, if the dead render and the WebSocket
+  > connect are served by different nodes, the token cannot be redeemed on the connect
+  > node and the LiveView mounts normally (cold). There is no correctness impact; resume
+  > is a best-effort optimisation that degrades gracefully.
+
+  > #### Resource use on public pages {: .warning}
+  >
+  > Each held socket occupies memory for up to `:ttl` milliseconds. On public,
+  > unauthenticated pages an attacker can trigger dead renders to accumulate holder
+  > processes. This is bounded by `:max_children` (excess dead renders skip resume and
+  > mount normally) and by the short TTL. There is no built-in per-IP throttle today;
+  > applications that expose resume on public pages and want defence-in-depth may add
+  > one at the point where the resume token is emitted (the graceful-degradation path
+  > is the natural seam for it).
+
+  > #### State freshness and authentication {: .warning}
+  >
+  > The resumed socket reuses the assigns computed during the dead render. Any value
+  > that can change in the window between the dead render and the WebSocket connect
+  > (up to `:ttl`) will be stale. Prefer `on_mount` hooks or `assign_new/3` for such
+  > values: `on_mount` hooks re-run on every connect, including resumed ones, so
+  > authentication and authorisation checks placed there remain authoritative. Loading
+  > sensitive identity data directly in `c:mount/3` instead of `on_mount` risks
+  > carrying a stale user identity into the connected session.
+
   ## Endpoint configuration
 
   LiveView accepts the following configuration in your endpoint under
@@ -270,6 +327,32 @@ defmodule Phoenix.LiveView do
               socket :: Socket.t()
             ) ::
               {:ok, Socket.t()} | {:ok, Socket.t(), keyword()}
+
+  @doc """
+  Invoked once per WebSocket connect, after state is in place and before `handle_params`.
+
+  Fires on every live attach — cold connect, warm/resumed connect, and reconnect — giving
+  you a single reliable home for connected-only work: PubSub subscriptions, timer starts,
+  `Presence.track`, and anything else that must run exactly once each time the LiveView is
+  connected but that must not run during the dead render.
+
+  With the resume feature, `c:mount/3` is skipped on a warm connect. Any
+  `if connected?(socket)` guard inside `c:mount/3` therefore also skips, silently dropping
+  subscriptions and timers. Move that work here and it will run on every connect regardless
+  of whether the resume path was taken.
+
+  The callback receives the connected socket (transport PID is set, `connected?/1` is `true`)
+  and must return `{:ok, socket}`.
+
+  ## Examples
+
+      def on_connect(socket) do
+        Phoenix.PubSub.subscribe(MyApp.PubSub, "topic:\#{socket.assigns.id}")
+        {:ok, socket}
+      end
+
+  """
+  @callback on_connect(socket :: Socket.t()) :: {:ok, Socket.t()}
 
   @doc """
   Renders a template.
@@ -388,6 +471,7 @@ defmodule Phoenix.LiveView do
               {:noreply, Socket.t()}
 
   @optional_callbacks mount: 3,
+                      on_connect: 1,
                       render: 1,
                       terminate: 2,
                       handle_params: 3,
@@ -420,6 +504,12 @@ defmodule Phoenix.LiveView do
 
     * `:log` - configures the log level for the LiveView, either `false`
       or a log level
+
+    * `:resume` - opt-in per-LiveView override for the dead-render resume feature.
+      `true` forces resume on for this LiveView even if the app-wide `:resume` config
+      is disabled; `false` forces it off even if app-wide resume is enabled; when absent
+      (the default), the LiveView inherits the app-wide setting. See the
+      [`:resume` application configuration](#module-resume-configuration) for details.
 
   """
 
@@ -503,12 +593,20 @@ defmodule Phoenix.LiveView do
 
     container = opts[:container] || {:div, []}
 
+    resume =
+      case Keyword.fetch(opts, :resume) do
+        {:ok, val} when is_boolean(val) -> val
+        :error -> :inherit
+        _ -> raise ArgumentError, ":resume expects a boolean, got: #{inspect(opts[:resume])}"
+      end
+
     %{
       container: container,
       kind: :view,
       layout: layout,
       lifecycle: Phoenix.LiveView.Lifecycle.build(on_mount),
-      log: log
+      log: log,
+      resume: resume
     }
   end
 

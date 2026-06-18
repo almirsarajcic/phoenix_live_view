@@ -205,5 +205,61 @@ defmodule Phoenix.LiveViewTest.Support.Router do
     live "/thermo-with-metadata", ThermostatLive, metadata: %{route_name: "opts"}
   end
 
+  # Resume routes
+  scope "/resume", alias: Phoenix.LiveViewTest.Support do
+    pipe_through :browser
+
+    live "/plain", ResumeLive
+
+    live_session :resume_record_pid, on_mount: Phoenix.LiveViewTest.Support.ResumeRecordPid do
+      live "/on-mount", ResumeLive
+    end
+
+    live_session :resume_halt, on_mount: Phoenix.LiveViewTest.Support.ResumeHaltMount do
+      live "/halt", ResumeLive
+    end
+
+    live_session :resume_order,
+      on_mount: [
+        Phoenix.LiveViewTest.Support.ResumeOrderA,
+        Phoenix.LiveViewTest.Support.ResumeOrderB
+      ] do
+      live "/order", ResumeLive
+    end
+
+    live_session :resume_sentinel, on_mount: Phoenix.LiveViewTest.Support.ResumeReuseHook do
+      live "/sentinel", ResumeSentinelLive
+    end
+
+    live_session :resume_attach_in_mount,
+      on_mount: Phoenix.LiveViewTest.Support.ResumeAttachInMount do
+      live "/attach-in-mount", ResumeAttachInMountLive
+    end
+
+    live_session :resume_cont_redirect,
+      on_mount: Phoenix.LiveViewTest.Support.ResumeContRedirect do
+      live "/cont-redirect", ResumeLive
+    end
+
+    # on_connect/1 callback route
+    live "/on-connect", ResumeOnConnectLive
+
+    # on_connect → push_patch route (B1 warm flag regression)
+    live "/patch", ResumePatchLive
+
+    # handle_params reuse-on-warm route
+    live "/handle-params", ResumeHandleParamsLive
+
+    # Per-view opt-in/opt-out routes
+    live "/opt-in", ResumeOptInLive
+    live "/opt-out", ResumeOptOutLive
+
+    # Auth contract route — session data injected via conn session in test setup
+    live_session :resume_auth,
+      on_mount: Phoenix.LiveViewTest.Support.ResumeAuthHook do
+      live "/auth", ResumeAuthLive
+    end
+  end
+
   def session(%Plug.Conn{}, extra), do: Map.merge(extra, %{"called" => true})
 end

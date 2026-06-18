@@ -247,6 +247,9 @@ defmodule Phoenix.LiveViewTest do
 
   ## Options
 
+    * `:connect_params` - additional connect params merged into any params previously set
+      via `put_connect_params/2`. The `connect_params:` option wins on key conflicts
+      (right-side `Map.merge`).
     * `:on_error` - Can be either `:raise` or `:warn` to control whether
        detected errors like duplicate IDs or live components fail the test or just log
        a warning. Defaults to `:raise`.
@@ -396,7 +399,11 @@ defmodule Phoenix.LiveViewTest do
 
     start_proxy(path, %{
       response: {:document, Phoenix.ConnTest.response(conn, 200)},
-      connect_params: conn.private[:live_view_connect_params] || %{},
+      connect_params:
+        Map.merge(
+          conn.private[:live_view_connect_params] || %{},
+          opts[:connect_params] || %{}
+        ),
       connect_info: conn.private[:live_view_connect_info] || prune_conn(conn),
       live_module: live_module,
       router: router,

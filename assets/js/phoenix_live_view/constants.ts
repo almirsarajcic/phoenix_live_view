@@ -63,6 +63,7 @@ export const FOCUSABLE_INPUTS = [
 ];
 export const CHECKABLE_INPUTS = ["checkbox", "radio"];
 export const PHX_HAS_SUBMITTED = "phx-has-submitted";
+export const PHX_RESUME = "data-phx-resume";
 export const PHX_SESSION = "data-phx-session";
 export const PHX_VIEW_SELECTOR = `[${PHX_SESSION}]`;
 export const PHX_STICKY = "data-phx-sticky";

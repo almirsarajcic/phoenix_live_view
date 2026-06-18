@@ -1,5 +1,5 @@
 defmodule Phoenix.LiveViewTest.Support.StreamLive do
-  use Phoenix.LiveView
+  use Phoenix.LiveView, resume: true
 
   def run(lv, func) do
     GenServer.call(lv.pid, {:run, func})

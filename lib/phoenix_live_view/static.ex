@@ -6,6 +6,8 @@ defmodule Phoenix.LiveView.Static do
   # Holds the logic for static rendering.
   @moduledoc false
 
+  require Logger
+
   alias Phoenix.LiveView.{Socket, Utils, Diff, Route, Lifecycle}
 
   # Token version. Should be changed whenever new data is stored.
@@ -159,7 +161,26 @@ defmodule Phoenix.LiveView.Static do
           phx_static: sign_static_token(socket)
         ]
 
-        data_attrs = if(router, do: [phx_main: true], else: []) ++ data_attrs
+        resume_enabled? = Phoenix.LiveView.Resume.enabled?(config)
+
+        resume_data =
+          if resume_enabled? do
+            case Phoenix.LiveView.Resume.issue(socket) do
+              {:ok, token} ->
+                [phx_resume: token]
+
+              {:error, reason} ->
+                Logger.debug(
+                  "Phoenix.LiveView could not issue a resume token (falling back to a cold mount): #{inspect(reason)}"
+                )
+
+                []
+            end
+          else
+            []
+          end
+
+        data_attrs = if(router, do: [phx_main: true], else: []) ++ resume_data ++ data_attrs
 
         attrs = [
           {:id, socket.id},
