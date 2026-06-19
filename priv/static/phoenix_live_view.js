@@ -110,6 +110,7 @@ var LiveView = (() => {
   ];
   var CHECKABLE_INPUTS = ["checkbox", "radio"];
   var PHX_HAS_SUBMITTED = "phx-has-submitted";
+  var PHX_RESUME = "data-phx-resume";
   var PHX_SESSION = "data-phx-session";
   var PHX_VIEW_SELECTOR = `[${PHX_SESSION}]`;
   var PHX_STICKY = "data-phx-sticky";
@@ -2346,6 +2347,7 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       this.afterTransitionsDiscardedCallbacks = [];
       this.withChildren = opts.withChildren || opts.undoRef !== void 0 || false;
       this.undoRef = (_a = opts.undoRef) != null ? _a : null;
+      this.warmJoin = opts.warm || false;
     }
     beforeUpdated(callback) {
       this.beforeUpdatedCallbacks.push(callback);
@@ -2651,6 +2653,13 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
         if (isJoinPatch) {
           dom_default.all(this.container, `[${phxUpdate}=${PHX_STREAM}]`).filter((el) => this.view.ownsElement(el)).forEach((el) => {
             Array.from(el.children).forEach((child) => {
+              if (this.warmJoin && this.streamInserts[child.id]) {
+                const { ref } = this.getStreamInsert(child);
+                if (ref !== void 0) {
+                  this.setStreamRef(child, ref);
+                }
+                return;
+              }
               this.removeStreamChildElement(child, true);
             });
           });
@@ -4295,8 +4304,9 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       this.children = this.parent ? null : {};
       this.root.children[this.id] = {};
       this.formsForRecovery = {};
+      this.isResumed = false;
       this.channel = this.liveSocket.channel(`lv:${this.id}`, () => {
-        var _a;
+        var _a, _b;
         const url = this.href && this.expandURL(this.href);
         return {
           redirect: this.redirect ? url : void 0,
@@ -4305,6 +4315,7 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
           session: this.getSession(),
           static: this.getStatic(),
           flash: (_a = this.flash) != null ? _a : void 0,
+          resume: (_b = this.getResumeToken()) != null ? _b : void 0,
           sticky: this.el.hasAttribute(PHX_STICKY)
         };
       });
@@ -4339,6 +4350,9 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
     }
     getSession() {
       return this.el.getAttribute(PHX_SESSION);
+    }
+    getResumeToken() {
+      return this.el.getAttribute(PHX_RESUME);
     }
     getStatic() {
       const val = this.el.getAttribute(PHX_STATIC);
@@ -4475,6 +4489,7 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
     }
     onJoin(resp) {
       const { rendered, container, liveview_version, pid } = resp;
+      this.isResumed = !!resp.warm;
       if (container) {
         const [tag, attrs] = container;
         this.el = dom_default.replaceRootContainer(this.el, tag, attrs);
@@ -4614,7 +4629,9 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
         }
       }
       this.attachTrueDocEl();
-      const patch = new DOMPatch(this, this.el, html, streams, null);
+      const patch = new DOMPatch(this, this.el, html, streams, null, {
+        warm: this.isResumed
+      });
       patch.markPrunableContentForRemoval();
       this.performPatch(patch, false, true);
       this.joinNewChildren();

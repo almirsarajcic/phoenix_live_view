@@ -93,6 +93,7 @@ var FOCUSABLE_INPUTS = [
 ];
 var CHECKABLE_INPUTS = ["checkbox", "radio"];
 var PHX_HAS_SUBMITTED = "phx-has-submitted";
+var PHX_RESUME = "data-phx-resume";
 var PHX_SESSION = "data-phx-session";
 var PHX_VIEW_SELECTOR = `[${PHX_SESSION}]`;
 var PHX_STICKY = "data-phx-sticky";
@@ -2326,6 +2327,7 @@ var DOMPatch = class {
     this.afterTransitionsDiscardedCallbacks = [];
     this.withChildren = opts.withChildren || opts.undoRef !== void 0 || false;
     this.undoRef = opts.undoRef ?? null;
+    this.warmJoin = opts.warm || false;
   }
   beforeUpdated(callback) {
     this.beforeUpdatedCallbacks.push(callback);
@@ -2629,6 +2631,13 @@ var DOMPatch = class {
       if (isJoinPatch) {
         dom_default.all(this.container, `[${phxUpdate}=${PHX_STREAM}]`).filter((el) => this.view.ownsElement(el)).forEach((el) => {
           Array.from(el.children).forEach((child) => {
+            if (this.warmJoin && this.streamInserts[child.id]) {
+              const { ref } = this.getStreamInsert(child);
+              if (ref !== void 0) {
+                this.setStreamRef(child, ref);
+              }
+              return;
+            }
             this.removeStreamChildElement(child, true);
           });
         });
@@ -4273,6 +4282,7 @@ var View = class _View {
     this.children = this.parent ? null : {};
     this.root.children[this.id] = {};
     this.formsForRecovery = {};
+    this.isResumed = false;
     this.channel = this.liveSocket.channel(`lv:${this.id}`, () => {
       const url = this.href && this.expandURL(this.href);
       return {
@@ -4282,6 +4292,7 @@ var View = class _View {
         session: this.getSession(),
         static: this.getStatic(),
         flash: this.flash ?? void 0,
+        resume: this.getResumeToken() ?? void 0,
         sticky: this.el.hasAttribute(PHX_STICKY)
       };
     });
@@ -4316,6 +4327,9 @@ var View = class _View {
   }
   getSession() {
     return this.el.getAttribute(PHX_SESSION);
+  }
+  getResumeToken() {
+    return this.el.getAttribute(PHX_RESUME);
   }
   getStatic() {
     const val = this.el.getAttribute(PHX_STATIC);
@@ -4452,6 +4466,7 @@ var View = class _View {
   }
   onJoin(resp) {
     const { rendered, container, liveview_version, pid } = resp;
+    this.isResumed = !!resp.warm;
     if (container) {
       const [tag, attrs] = container;
       this.el = dom_default.replaceRootContainer(this.el, tag, attrs);
@@ -4591,7 +4606,9 @@ var View = class _View {
       }
     }
     this.attachTrueDocEl();
-    const patch = new DOMPatch(this, this.el, html, streams, null);
+    const patch = new DOMPatch(this, this.el, html, streams, null, {
+      warm: this.isResumed
+    });
     patch.markPrunableContentForRemoval();
     this.performPatch(patch, false, true);
     this.joinNewChildren();
